@@ -235,7 +235,7 @@ int get_attestation_report(IAS_Connection *ias, int version,
 	return 0;
 }
 
-void loadConfig(config_t *config) {
+int loadConfig(config_t *config) {
 	config->apiver= IAS_API_DEF_VERSION;
 	config->quote_type = SGX_LINKABLE_SIGNATURE;
 	config->strict_trust= 0;
@@ -246,34 +246,34 @@ void loadConfig(config_t *config) {
 	 */
 	config->allow_debug_enclave= 1;
 
-    if (!cert_load_file(&config->signing_ca, "ias-cert.pem")) {
-//        throw SgxException(SGX_ERROR_UNEXPECTED);
+    if (!cert_load_file(&config->signing_ca, IAS_CERT_FILENAME)) {
         printf("can't load cert file\n");
+        return -1;
     }
 
     config->store = cert_init_ca(config->signing_ca);
     if (config->store == NULL) {
-//        throw SgxException(SGX_ERROR_UNEXPECTED);
         printf("%s: could not initialize certificate store\n", optarg);
+        return -1;
     }
 
-// TODO: read MRSIGNER
-    if (!from_hexstring((unsigned char *)&config->req_mrsigner, "some-mrsigner", 32)) {
-//        throw SgxException(SGX_ERROR_UNEXPECTED);
+    if (!from_hexstring((unsigned char *)&config->req_mrsigner, MRSIGNER, 32)) {
         printf("MRSIGNER must be 64-byte hex string\n");
+        return -1;
     }
 
     config->req_isv_product_id = 0;
     config->min_isvsvn = 0;
-    strncpy((char *) config->pri_subscription_key, "primary-subscription-key", IAS_SUBSCRIPTION_KEY_SIZE);
-    strncpy((char *) config->sec_subscription_key, "secondary-subscription-key", IAS_SUBSCRIPTION_KEY_SIZE);
+    strncpy((char *) config->pri_subscription_key, IAS_PRIMARY_SUBSCRIPTION_KEY, IAS_SUBSCRIPTION_KEY_SIZE);
+    strncpy((char *) config->sec_subscription_key, IAS_SECONDARY_SUBSCRIPTION_KEY, IAS_SUBSCRIPTION_KEY_SIZE);
 
-    if (!from_hexstring((unsigned char *)&config->spid, (unsigned char *)"your-spid", 16)) {
-//        throw SgxException(SGX_ERROR_UNEXPECTED);
+    if (!from_hexstring((unsigned char *)&config->spid, (unsigned char *)SPID, 16)) {
         printf("SPID must be 32-byte hex string\n");
+        return -1;
     }
 
     printf("loaded Config\n");
+    return 0;
 }
 
 int derive_kdk(EVP_PKEY *Gb, unsigned char kdk[16], sgx_ec256_public_t g_a,
@@ -687,6 +687,7 @@ int process_msg3 (MsgIO *msgio, IAS_Connection *ias, sgx_ra_msg1_t *msg1,
 		 */
 
 		if ( msg4->status == Trusted ) {
+		    printf("Enclave is TRUSTED, it is safe to provide it with secrets\n");
 			unsigned char hashmk[32], hashsk[32];
 
 			cmac128(session->kdk, (unsigned char *)("\x01MK\x00\x80\x00"),
@@ -696,6 +697,8 @@ int process_msg3 (MsgIO *msgio, IAS_Connection *ias, sgx_ra_msg1_t *msg1,
 
 			sha256_digest(session->mk, 16, hashmk);
 			sha256_digest(session->sk, 16, hashsk);
+		} else {
+		    printf("Enclave status was not equal to TRUSTED. Contact Enclave host.\n");
 		}
 
 	} else {
@@ -751,10 +754,13 @@ int main(int argc, char *argv[])
         msgio= new MsgIO(NULL, (port == NULL) ? DEFAULT_PORT : port);
     }
     catch(...) {
-        return 1;
+        return -1;
     }
 
-    loadConfig(&config);
+    if (loadConfig(&config) == -1) {
+        printf("Error while loading config\n");
+        return -1;
+    }
 
 	/* Use the default CA bundle unless one is provided */
 
@@ -762,7 +768,7 @@ int main(int argc, char *argv[])
 		config.ca_bundle= strdup(DEFAULT_CA_BUNDLE);
 		if ( config.ca_bundle == NULL ) {
 			perror("strdup");
-			return 1;
+            return -1;
 		}
 	}
 
@@ -776,7 +782,7 @@ int main(int argc, char *argv[])
 		config.service_private_key = key_private_from_bytes(def_service_private_key);
 		if (config.service_private_key == NULL) {
 			crypto_perror("key_private_from_bytes");
-			return 1;
+            return -1;
 		}
 	}
 
@@ -797,7 +803,7 @@ int main(int argc, char *argv[])
 	catch (...) {
 		oops = 1;
 		printf("exception while creating IAS request object\n");
-		return 1;
+        return -1;
 	}
 
     ias->proxy_mode(IAS_PROXY_NONE);
@@ -836,8 +842,7 @@ int main(int argc, char *argv[])
 
 		/* Read message 0 and 1, then generate message 2 */
 
-		if ( ! process_msg01(msgio, ias, &msg1, &msg2, &sigrl, &config,
-			&session) ) {
+		if (!process_msg01(msgio, ias, &msg1, &msg2, &sigrl, &config, &session)) {
 
 			printf("error processing msg1\n");
 			msgio->disconnect();
@@ -862,6 +867,7 @@ int main(int argc, char *argv[])
 		if (!process_msg3(msgio, ias, &msg1, &msg4, &config, &session)) {
 			printf("error processing msg3\n");
 			msgio->disconnect();
+            return -1;
 		}
 	}
 
